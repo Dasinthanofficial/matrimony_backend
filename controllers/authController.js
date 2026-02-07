@@ -1,39 +1,36 @@
-// server/controllers/authController.js
+// ===== FIXED FILE: ./controllers/authController.js =====
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import mongoose from 'mongoose'; // ✅ FIX: Added for transaction
 import User from '../models/User.js';
 import Profile from '../models/Profile.js';
+import Interest from '../models/Interest.js'; // ✅ FIX: Added for cleanup
+import Shortlist from '../models/Shortlist.js'; // ✅ FIX: Added for cleanup
+import Notification from '../models/Notification.js'; // ✅ FIX: Added for cleanup
+import Message from '../models/Message.js'; // ✅ FIX: Added for cleanup
+import Conversation from '../models/Conversation.js'; // ✅ FIX: Added for cleanup
+import Subscription from '../models/Subscription.js'; // ✅ FIX: Added for cleanup
+import Payment from '../models/Payment.js'; // ✅ FIX: Added for cleanup
 import { handleControllerError, AppError } from '../utils/errors.js';
 import { TOKEN_EXPIRY } from '../utils/constants.js';
 
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
-/**
- * Generate JWT access token with id + role
- */
 const generateAccessToken = (user) => {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error('JWT_SECRET is not configured');
 
   return jwt.sign(
-    {
-      id: user._id,
-      role: user.role,
-    },
+    { id: user._id, role: user.role },
     secret,
-    {
-      expiresIn: process.env.JWT_EXPIRE || TOKEN_EXPIRY.ACCESS_TOKEN,
-    }
+    { expiresIn: process.env.JWT_EXPIRE || TOKEN_EXPIRY.ACCESS_TOKEN }
   );
 };
 
 const generateRefreshToken = () => crypto.randomBytes(40).toString('hex');
 const hashToken = (token) => sha256(token);
 
-/**
- * Get user data with profile photo and completion info
- */
 const getUserWithPhoto = async (user) => {
   let photoUrl = null;
   let fullName = null;
@@ -72,7 +69,6 @@ const getUserWithPhoto = async (user) => {
     email: user.email,
     role: user.role,
     subscription: user.subscription,
-    profileStatus: user.profileStatus, // if unused, feel free to remove
     profileId,
     phone: user.phone,
     countryCode: user.countryCode,
@@ -112,6 +108,10 @@ export const register = async (req, res) => {
       }
     }
 
+    // ✅ FIX: Basic countryCode validation
+    const validCountryCode =
+      countryCode && /^\+\d{1,4}$/.test(countryCode) ? countryCode : '+91';
+
     const refreshToken = generateRefreshToken();
 
     const user = await User.create({
@@ -119,7 +119,7 @@ export const register = async (req, res) => {
       password,
       refreshToken: hashToken(refreshToken),
       phone: phone || undefined,
-      countryCode: countryCode || '+91',
+      countryCode: validCountryCode,
       isActive: true,
       isSuspended: false,
     });
@@ -181,7 +181,6 @@ export const login = async (req, res) => {
     await user.save();
 
     const userData = await getUserWithPhoto(user);
-
     res.json({ user: userData, token, refreshToken });
   } catch (e) {
     handleControllerError(res, e, 'Login');
@@ -330,7 +329,7 @@ export const resetPassword = async (req, res) => {
       return res.status(400).json({ message: 'Token expired' });
     }
 
-    user.password = password; // pre-save hook handles hashing
+    user.password = password;
     user.passwordResetToken = undefined;
     user.passwordResetExpiry = undefined;
     user.refreshToken = undefined;
@@ -359,7 +358,7 @@ export const changePassword = async (req, res) => {
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Current password incorrect' });
 
-    user.password = newPassword; // pre-save hook hashes
+    user.password = newPassword;
     await user.save();
 
     res.json({ message: 'Password changed' });
@@ -368,22 +367,70 @@ export const changePassword = async (req, res) => {
   }
 };
 
+// ✅ FIX: Full cleanup with transaction — no orphaned data
 export const deleteAccount = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { password } = req.body;
+    const userId = req.user._id;
 
-    const user = await User.findById(req.user._id).select('+password');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    if (!password) return res.status(400).json({ message: 'Password confirmation required' });
+    const user = await User.findById(userId).select('+password').session(session);
+    if (!user) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (!password) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Password confirmation required' });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid password' });
+    if (!isMatch) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'Invalid password' });
+    }
 
-    await Profile.findOneAndDelete({ userId: user._id });
-    await User.findByIdAndDelete(user._id);
+    // ✅ FIX: Clean up ALL related data atomically
+    await Profile.deleteOne({ userId }).session(session);
+    await Interest.deleteMany({
+      $or: [{ senderId: userId }, { receiverId: userId }],
+    }).session(session);
+    await Shortlist.deleteMany({
+      $or: [{ userId }, { shortlistedUserId: userId }],
+    }).session(session);
+    await Notification.deleteMany({ userId }).session(session);
+    await Message.updateMany(
+      { $or: [{ senderId: userId }, { receiverId: userId }] },
+      { isDeleted: true, deletedAt: new Date() }
+    ).session(session);
+    await Subscription.deleteOne({ userId }).session(session);
+    await Payment.deleteMany({ userId }).session(session);
+
+    // Remove user from conversations (soft: mark messages deleted, remove participant)
+    const userConversations = await Conversation.find({ participants: userId })
+      .select('_id')
+      .session(session);
+    for (const conv of userConversations) {
+      await Message.updateMany(
+        { conversationId: conv._id },
+        { isDeleted: true, deletedAt: new Date() }
+      ).session(session);
+    }
+    await Conversation.deleteMany({
+      participants: userId,
+    }).session(session);
+
+    await User.findByIdAndDelete(userId).session(session);
+
+    await session.commitTransaction();
 
     res.json({ message: 'Account deleted' });
   } catch (e) {
+    await session.abortTransaction();
     handleControllerError(res, e, 'Delete account');
+  } finally {
+    session.endSession();
   }
 };

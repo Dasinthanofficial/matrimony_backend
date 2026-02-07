@@ -1,5 +1,3 @@
-// ===== FILE: ./utils/constants.js =====
-
 export const LIMITS = {
   MAX_MESSAGE_LENGTH: 2000,
   MAX_INTEREST_MESSAGE: 200,
@@ -9,8 +7,8 @@ export const LIMITS = {
   MAX_NAME_LENGTH: 100,
   MAX_REASON_LENGTH: 500,
 
-  MAX_PHOTOS: 10,
-  MAX_FILE_SIZE: 10 * 1024 * 1024, // 10MB
+  MAX_PHOTOS: 6, // aligned with UI + upload middleware
+  MAX_FILE_SIZE: 5 * 1024 * 1024, // 5MB
 
   DEFAULT_PAGE: 1,
   DEFAULT_LIMIT: 20,
@@ -54,10 +52,8 @@ export const MARITAL_STATUSES = [
   'annulled',
 ];
 
-// ✅ Match Profile.gender enum
 export const GENDERS = ['male', 'female'];
 
-// ✅ Match Profile.diet enum
 export const DIET_OPTIONS = [
   'vegetarian',
   'non_vegetarian',
@@ -67,5 +63,4 @@ export const DIET_OPTIONS = [
   'pescatarian',
 ];
 
-// ✅ Match Profile.bodyType enum (excluding empty string)
 export const BODY_TYPES = ['slim', 'average', 'athletic', 'heavy', 'fit'];

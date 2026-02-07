@@ -1,6 +1,8 @@
+// ===== UPDATED FILE: ./validators/commonValidator.js =====
 import { body, query, param } from 'express-validator';
 
-export const profileValidator = [
+// Create profile (required fields)
+export const createProfileValidator = [
   body('fullName')
     .trim()
     .notEmpty().withMessage('Full name required')
@@ -15,6 +17,40 @@ export const profileValidator = [
     .withMessage('Invalid marital status'),
 ];
 
+// Update profile (all optional, but validated if present)
+export const updateProfileValidator = [
+  body('fullName')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('Full name required')
+    .isLength({ max: 100 }).withMessage('Name too long'),
+  body('gender')
+    .optional()
+    .isIn(['male','female']).withMessage('Invalid gender'),
+  body('dateOfBirth')
+    .optional()
+    .isISO8601().withMessage('Valid date required'),
+  body('religion')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('Religion required'),
+  body('country')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('Country required'),
+  body('city')
+    .optional()
+    .trim()
+    .notEmpty().withMessage('City required'),
+  body('maritalStatus')
+    .optional()
+    .isIn(['never_married','divorced','widowed','awaiting_divorce','annulled'])
+    .withMessage('Invalid marital status'),
+];
+
+// Backwards compatibility (if anything else imports profileValidator)
+export const profileValidator = createProfileValidator;
+
 export const searchValidator = [
   query('page').optional().isInt({ min: 1 }).withMessage('Page must be positive integer'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be 1–100'),
@@ -25,12 +61,19 @@ export const searchValidator = [
 
 // Match Interest schema max length (200)
 export const interestValidator = [
-  body('receiverId').notEmpty().withMessage('Receiver ID required').isMongoId().withMessage('Invalid receiver ID'),
-  body('message').optional().trim().isLength({ max: 200 }).withMessage('Message too long (max 200 characters)'),
+  body('receiverId')
+    .notEmpty().withMessage('Receiver ID required')
+    .isMongoId().withMessage('Invalid receiver ID'),
+  body('message')
+    .optional()
+    .trim()
+    .isLength({ max: 200 }).withMessage('Message too long (max 200 characters)'),
 ];
 
 export const reportValidator = [
-  body('reportedUserId').notEmpty().withMessage('User ID required').isMongoId().withMessage('Invalid user ID'),
+  body('reportedUserId')
+    .notEmpty().withMessage('User ID required')
+    .isMongoId().withMessage('Invalid user ID'),
   body('reportType')
     .isIn([
       'fake_profile','inappropriate_behavior','harassment',
@@ -41,6 +84,14 @@ export const reportValidator = [
     .trim()
     .notEmpty().withMessage('Description required')
     .isLength({ max: 500 }).withMessage('Description too long'),
+  body('evidence')
+    .optional()
+    .isArray({ max: 10 }).withMessage('Evidence must be an array of up to 10 items'),
+  body('evidence.*')
+    .optional()
+    .isString().withMessage('Evidence items must be strings')
+    .trim()
+    .notEmpty().withMessage('Evidence items must be non-empty strings'),
 ];
 
 export const mongoIdValidator = [

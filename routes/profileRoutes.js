@@ -1,6 +1,8 @@
-// ===== FILE: server/routes/profileRoutes.js =====
+// ===== UPDATED FILE: ./routes/profileRoutes.js =====
 import express from 'express';
 import { protect, optionalAuth } from '../middleware/authMiddleware.js';
+import { handleValidation } from '../middleware/validate.js';
+import { createProfileValidator, updateProfileValidator } from '../validators/commonValidator.js';
 import {
   getMyProfile,
   createProfile,
@@ -20,8 +22,8 @@ const router = express.Router();
 
 // Profile CRUD
 router.get('/', protect, getMyProfile);
-router.post('/', protect, createProfile);
-router.put('/', protect, updateProfile);
+router.post('/', protect, createProfileValidator, handleValidation, createProfile);
+router.put('/', protect, updateProfileValidator, handleValidation, updateProfile);
 router.delete('/', protect, deleteProfile);
 
 // Profile completion

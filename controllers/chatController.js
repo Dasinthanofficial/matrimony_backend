@@ -1,8 +1,9 @@
-// ===== FILE: ./controllers/chatController.js =====
+// ===== FIXED FILE: ./controllers/chatController.js =====
 import mongoose from 'mongoose';
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
 import Profile from '../models/Profile.js';
+import User from '../models/User.js'; // ✅ FIX: Added for receiver validation
 import { hasPremiumAccess } from '../utils/entitlements.js';
 import { handleControllerError } from '../utils/errors.js';
 import { parsePagination, formatPaginationResponse } from '../utils/pagination.js';
@@ -10,18 +11,10 @@ import { LIMITS } from '../utils/constants.js';
 
 const getUnreadForUser = (unreadCount, userId) => {
   if (!unreadCount || !userId) return 0;
-
   const key = userId.toString();
-
-  // Mongoose Map on non-lean docs
   if (typeof unreadCount?.get === 'function') return Number(unreadCount.get(key) || 0);
-
-  // Lean object
   if (typeof unreadCount === 'object') return Number(unreadCount[key] || 0);
-
-  // If it ever comes as number
   if (typeof unreadCount === 'number') return unreadCount;
-
   return 0;
 };
 
@@ -31,7 +24,15 @@ const pickOtherUserId = (participants = [], me) => {
   return other || null;
 };
 
-// Get conversations
+// ✅ FIX: Helper to validate receiver exists and is active
+const validateReceiver = async (receiverId) => {
+  const receiver = await User.findById(receiverId).select('isSuspended isActive').lean();
+  if (!receiver) return { valid: false, message: 'Receiver not found', status: 404 };
+  if (receiver.isSuspended) return { valid: false, message: 'Cannot interact with suspended user', status: 400 };
+  if (receiver.isActive === false) return { valid: false, message: 'Cannot interact with inactive user', status: 400 };
+  return { valid: true };
+};
+
 export const getConversations = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -46,7 +47,6 @@ export const getConversations = async (req, res) => {
       Conversation.countDocuments({ participants: userId }),
     ]);
 
-    // Batch fetch profiles for "other" participants (avoids N+1)
     const otherUserIds = conversations
       .map((c) => pickOtherUserId(c.participants, userId))
       .filter(Boolean);
@@ -66,14 +66,13 @@ export const getConversations = async (req, res) => {
     const formatted = conversations.map((conv) => {
       const otherUserId = pickOtherUserId(conv.participants, userId);
       const profile = otherUserId ? profileByUserId.get(otherUserId.toString()) : null;
-
       const unreadForMe = getUnreadForUser(conv.unreadCount, userId);
 
       return {
         ...conv,
         otherUser: profile || (otherUserId ? { userId: otherUserId } : null),
-        unreadCount: unreadForMe, // ✅ keep frontend compatibility (number)
-        unreadForMe, // ✅ nicer alias for newer frontend
+        unreadCount: unreadForMe,
+        unreadForMe,
       };
     });
 
@@ -86,7 +85,7 @@ export const getConversations = async (req, res) => {
   }
 };
 
-// Get or create conversation
+// ✅ FIX: Validate participant exists and is active
 export const getOrCreateConversation = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -98,6 +97,12 @@ export const getOrCreateConversation = async (req, res) => {
 
     if (participantId.toString() === userId.toString()) {
       return res.status(400).json({ message: 'Cannot create conversation with yourself' });
+    }
+
+    // ✅ FIX: Check participant exists and is active
+    const receiverCheck = await validateReceiver(participantId);
+    if (!receiverCheck.valid) {
+      return res.status(receiverCheck.status).json({ message: receiverCheck.message });
     }
 
     let conversation = await Conversation.findOne({
@@ -137,7 +142,6 @@ export const getOrCreateConversation = async (req, res) => {
   }
 };
 
-// Get single conversation
 export const getConversation = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -177,7 +181,6 @@ export const getConversation = async (req, res) => {
   }
 };
 
-// Get messages
 export const getMessages = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -215,7 +218,7 @@ export const getMessages = async (req, res) => {
   }
 };
 
-// Send message (HTTP fallback; your frontend can be socket-only)
+// ✅ FIX: Validate receiver exists and is active before sending
 export const sendMessage = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -239,7 +242,6 @@ export const sendMessage = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(conversationId)) {
         return res.status(400).json({ message: 'Invalid conversationId' });
       }
-
       conversation = await Conversation.findOne({ _id: conversationId, participants: userId });
     } else {
       if (!receiverId || !mongoose.Types.ObjectId.isValid(receiverId)) {
@@ -249,12 +251,24 @@ export const sendMessage = async (req, res) => {
         return res.status(400).json({ message: 'Cannot message yourself' });
       }
 
+      // ✅ FIX: Validate receiver
+      const receiverCheck = await validateReceiver(receiverId);
+      if (!receiverCheck.valid) {
+        return res.status(receiverCheck.status).json({ message: receiverCheck.message });
+      }
+
       conversation = await Conversation.findOne({
         participants: { $all: [userId, receiverId] },
       });
 
       if (!conversation) {
-        conversation = await Conversation.create({ participants: [userId, receiverId] });
+        conversation = await Conversation.create({
+          participants: [userId, receiverId],
+          unreadCount: new Map([
+            [userId.toString(), 0],
+            [receiverId.toString(), 0],
+          ]),
+        });
       }
     }
 
@@ -290,7 +304,6 @@ export const sendMessage = async (req, res) => {
   }
 };
 
-// Mark as read
 export const markAsRead = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -314,7 +327,6 @@ export const markAsRead = async (req, res) => {
       { isRead: true, readAt: new Date() }
     );
 
-    // ✅ works whether unreadCount exists or not
     await Conversation.updateOne(
       { _id: conversationId, participants: userId },
       { $set: { [`unreadCount.${userId.toString()}`]: 0 } }
@@ -326,7 +338,6 @@ export const markAsRead = async (req, res) => {
   }
 };
 
-// Delete message
 export const deleteMessage = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -349,7 +360,6 @@ export const deleteMessage = async (req, res) => {
   }
 };
 
-// Delete conversation
 export const deleteConversation = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -375,7 +385,6 @@ export const deleteConversation = async (req, res) => {
   }
 };
 
-// Get unread count (total)
 export const getUnreadCount = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -393,7 +402,6 @@ export const getUnreadCount = async (req, res) => {
   }
 };
 
-// Block user
 export const blockUser = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -403,11 +411,22 @@ export const blockUser = async (req, res) => {
       return res.status(400).json({ message: 'Invalid user ID' });
     }
 
-    const conversation = await Conversation.findOne({
+    // ✅ FIX: Create conversation if needed so block is always recorded
+    let conversation = await Conversation.findOne({
       participants: { $all: [userId, targetUserId] },
     });
 
-    if (conversation) {
+    if (!conversation) {
+      conversation = await Conversation.create({
+        participants: [userId, targetUserId],
+        isBlocked: true,
+        blockedBy: userId,
+        unreadCount: new Map([
+          [userId.toString(), 0],
+          [targetUserId.toString(), 0],
+        ]),
+      });
+    } else {
       conversation.isBlocked = true;
       conversation.blockedBy = userId;
       await conversation.save();
@@ -419,7 +438,6 @@ export const blockUser = async (req, res) => {
   }
 };
 
-// Unblock user
 export const unblockUser = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -446,7 +464,6 @@ export const unblockUser = async (req, res) => {
   }
 };
 
-// Get blocked users
 export const getBlockedUsers = async (req, res) => {
   try {
     const userId = req.user._id;

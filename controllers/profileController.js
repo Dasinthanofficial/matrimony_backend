@@ -1,9 +1,10 @@
-// ===== FILE: server/controllers/profileController.js =====
+// ===== UPDATED FILE: ./controllers/profileController.js =====
 import mongoose from 'mongoose';
 import Profile from '../models/Profile.js';
 import User from '../models/User.js';
 import Interest from '../models/Interest.js';
 import { applyProfilePrivacy } from '../utils/privacy.js';
+import { LIMITS } from '../utils/constants.js';
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -157,7 +158,7 @@ export const getMyProfile = async (req, res) => {
     const { id: userId } = req.user;
 
     const profile = await Profile.findOne({ userId })
-      .populate('userId', 'email phone countryCode isVerified isPremium');
+      .populate('userId', 'email phone countryCode isEmailVerified isPhoneVerified isPremium');
 
     if (!profile) {
       return res.status(404).json({ message: 'Profile not found', profile: null });
@@ -323,8 +324,9 @@ export const createProfile = async (req, res) => {
       };
     }
 
-    const { percentage } = calculateCompletion(profileData);
+    const { percentage, details } = calculateCompletion(profileData);
     profileData.completionPercentage = percentage;
+    profileData.completionDetails = details;
 
     const profile = await Profile.create(profileData);
 
@@ -444,7 +446,7 @@ export const updateProfile = async (req, res) => {
 
     const { percentage, details } = calculateCompletion(profile);
     profile.completionPercentage = percentage;
-
+    profile.completionDetails = details;
     await profile.save();
 
     if (updates.fullName) await User.findByIdAndUpdate(userId, { fullName: updates.fullName });
@@ -502,8 +504,9 @@ export const getCompletion = async (req, res) => {
 
     const { percentage, details } = calculateCompletion(profile);
 
-    if (profile.completionPercentage !== percentage) {
+    if (profile.completionPercentage !== percentage || !profile.completionDetails) {
       profile.completionPercentage = percentage;
+      profile.completionDetails = details;
       await profile.save();
     }
 
@@ -520,34 +523,28 @@ export const getProfileById = async (req, res) => {
   try {
     const { profileId } = req.params;
 
-    // ✅ FIX: prevent CastError by only querying _id when valid ObjectId
     const or = [{ profileId }];
     if (mongoose.Types.ObjectId.isValid(profileId)) {
       or.push({ _id: profileId });
     }
 
     const profile = await Profile.findOne({ $or: or })
-      // include contact fields on user so privacy can hide them properly
-      .populate('userId', 'email phone countryCode isPremium isVerified lastActive')
+      .populate('userId', 'email phone countryCode isPremium isEmailVerified isPhoneVerified lastActive')
       .lean();
 
     if (!profile) return res.status(404).json({ message: 'Profile not found' });
 
-    // viewer doc (for premium/registered logic)
     const viewer = await getViewerUserDoc(req);
 
-    // is viewer connected to this profile owner?
     const profileOwnerId = profile.userId?._id || profile.userId;
     const match = viewer?._id ? await isMatchWith(viewer._id, profileOwnerId) : false;
 
-    // Apply full privacy rules (premium/registered/matches/none + photos/contact/income)
     const safeProfile = applyProfilePrivacy({
       viewer,
       profile,
       isMatch: match,
     });
 
-    // Increment profile views if viewer is different from owner (optional behavior)
     if (viewer?._id && profileOwnerId && viewer._id.toString() !== profileOwnerId.toString()) {
       await Profile.updateOne({ _id: profile._id }, { $inc: { profileViews: 1 } });
     }
@@ -575,13 +572,13 @@ export const uploadPhotos = async (req, res) => {
     }
 
     const newPhotos = req.files.map((file, index) => ({
-      url: file.path || file.location || `/uploads/${file.filename}`,
+      url: file.location || `/uploads/${file.filename}`,
       publicId: file.filename || file.key,
       isProfile: profile.photos.length === 0 && index === 0,
       uploadedAt: new Date(),
     }));
 
-    const maxPhotos = 6;
+    const maxPhotos = LIMITS.MAX_PHOTOS;
     const currentCount = profile.photos.length;
     const allowedCount = Math.min(newPhotos.length, maxPhotos - currentCount);
 
@@ -591,8 +588,9 @@ export const uploadPhotos = async (req, res) => {
 
     profile.photos.push(...newPhotos.slice(0, allowedCount));
 
-    const { percentage } = calculateCompletion(profile);
+    const { percentage, details } = calculateCompletion(profile);
     profile.completionPercentage = percentage;
+    profile.completionDetails = details;
 
     await profile.save();
 
@@ -624,8 +622,9 @@ export const deletePhoto = async (req, res) => {
       profile.photos[0].isProfile = true;
     }
 
-    const { percentage } = calculateCompletion(profile);
+    const { percentage, details } = calculateCompletion(profile);
     profile.completionPercentage = percentage;
+    profile.completionDetails = details;
 
     await profile.save();
 
@@ -687,6 +686,7 @@ export const updatePartnerPreferences = async (req, res) => {
 
     const { percentage, details } = calculateCompletion(profile);
     profile.completionPercentage = percentage;
+    profile.completionDetails = details;
 
     await profile.save();
 

@@ -1,5 +1,3 @@
-// ===== FILE: ./controllers/searchController.js =====
-
 import Profile from '../models/Profile.js';
 import User from '../models/User.js';
 import Interest from '../models/Interest.js';
@@ -14,7 +12,7 @@ const escapeRegex = (str) => {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
-// Build set of userIds that have an accepted interest with viewer
+// Build set of userIds that are mutual matches with viewer (both directions accepted)
 const buildMatchSet = async (viewerId, candidateUserIds) => {
   if (!viewerId || !candidateUserIds?.length) return new Set();
 
@@ -28,13 +26,21 @@ const buildMatchSet = async (viewerId, candidateUserIds) => {
     .select('senderId receiverId')
     .lean();
 
-  const set = new Set();
+  const viewerStr = viewerId.toString();
+  const counts = new Map();
+
   for (const e of edges) {
     const s = e.senderId.toString();
     const r = e.receiverId.toString();
-    const other = s === viewerId.toString() ? r : s;
-    set.add(other);
+    const other = s === viewerStr ? r : s;
+    counts.set(other, (counts.get(other) || 0) + 1);
   }
+
+  const set = new Set();
+  counts.forEach((count, otherId) => {
+    if (count >= 2) set.add(otherId);
+  });
+
   return set;
 };
 
@@ -43,7 +49,6 @@ const buildMatchSet = async (viewerId, candidateUserIds) => {
  */
 const formatProfileWithUserData = async (profile, viewer) => {
   const user = await User.findById(profile.userId)
-    // 🚫 do not fetch email here; search payload must not expose email
     .select('_id isPremium isEmailVerified isPhoneVerified createdAt role subscription premiumExpiry')
     .lean()
     .catch(() => null);
@@ -54,16 +59,19 @@ const formatProfileWithUserData = async (profile, viewer) => {
     photoUrl = mainPhoto?.url || null;
   }
 
+  const isVerified = Boolean(profile.isVerified || user?.isEmailVerified || user?.isPhoneVerified);
+
   const raw = {
     _id: profile._id,
     id: profile.userId,
     userId: profile.userId,
 
-    // 🚫 email removed (privacy leak)
     role: user?.role || 'user',
     isPremium: user?.isPremium || false,
     isEmailVerified: user?.isEmailVerified || false,
     isPhoneVerified: user?.isPhoneVerified || false,
+    isVerified,
+
     createdAt: user?.createdAt || profile.createdAt,
 
     profileId: profile.profileId || profile._id?.toString(),
@@ -93,7 +101,7 @@ const formatProfileWithUserData = async (profile, viewer) => {
     completionDetails: profile.completionDetails || {},
     lastActive: profile.lastActive,
 
-    privacySettings: profile.privacySettings, // needed for applyProfilePrivacy
+    privacySettings: profile.privacySettings,
   };
 
   const matchSet = await buildMatchSet(viewer?._id, [profile.userId]);
@@ -115,7 +123,6 @@ const formatProfilesWithUserData = async (profiles, viewer) => {
   const userIds = profiles.map((p) => p.userId).filter(Boolean);
 
   const users = await User.find({ _id: { $in: userIds } })
-    // 🚫 do not fetch email here; search payload must not expose email
     .select('_id isPremium isEmailVerified isPhoneVerified createdAt role subscription premiumExpiry')
     .lean();
 
@@ -135,16 +142,19 @@ const formatProfilesWithUserData = async (profiles, viewer) => {
       photoUrl = mainPhoto?.url || null;
     }
 
+    const isVerified = Boolean(profile.isVerified || user?.isEmailVerified || user?.isPhoneVerified);
+
     const raw = {
       _id: profile._id,
       id: profile.userId,
       userId: profile.userId,
 
-      // 🚫 email removed (privacy leak)
       role: user?.role || 'user',
       isPremium: user?.isPremium || false,
       isEmailVerified: user?.isEmailVerified || false,
       isPhoneVerified: user?.isPhoneVerified || false,
+      isVerified,
+
       createdAt: user?.createdAt || profile.createdAt,
 
       profileId: profile.profileId || profile._id?.toString(),
@@ -185,11 +195,7 @@ const formatProfilesWithUserData = async (profiles, viewer) => {
   });
 };
 
-// ============================
-// Controllers
-// ============================
-
-// GET /api/search
+// Controllers unchanged below...
 export const searchProfiles = async (req, res) => {
   try {
     const viewer = req.user;
@@ -250,7 +256,7 @@ export const searchProfiles = async (req, res) => {
         .sort(sort)
         .skip(skip)
         .limit(limit)
-        .select('-partnerPreferences') // keep privacySettings for applyProfilePrivacy
+        .select('-partnerPreferences')
         .lean(),
       Profile.countDocuments(query),
     ]);
@@ -267,7 +273,6 @@ export const searchProfiles = async (req, res) => {
   }
 };
 
-// GET /api/search/quick
 export const quickSearch = async (req, res) => {
   try {
     const viewer = req.user;
@@ -315,7 +320,6 @@ export const quickSearch = async (req, res) => {
   }
 };
 
-// GET /api/search/suggested
 export const getSuggestedProfiles = async (req, res) => {
   try {
     const viewer = req.user;
@@ -336,7 +340,6 @@ export const getSuggestedProfiles = async (req, res) => {
   }
 };
 
-// GET /api/search/recent
 export const getRecentProfiles = async (req, res) => {
   try {
     const viewer = req.user;
@@ -357,7 +360,6 @@ export const getRecentProfiles = async (req, res) => {
   }
 };
 
-// GET /api/search/by-id/:profileId
 export const searchById = async (req, res) => {
   try {
     const viewer = req.user;
@@ -381,7 +383,6 @@ export const searchById = async (req, res) => {
   }
 };
 
-// GET /api/search/filters/options
 export const getFilterOptions = async (req, res) => {
   try {
     const [religions, cities, educations] = await Promise.all([

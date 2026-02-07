@@ -127,17 +127,24 @@ export const getUnlockedContacts = async (req, res) => {
     const userId = req.user._id;
     const { page, limit, skip } = parsePagination(req.query, { maxLimit: 50 });
 
-    const user = await User.findById(userId).populate('contactsUnlocked', 'email phone countryCode').lean();
+    const user = await User.findById(userId).select('contactsUnlocked').lean();
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const allContacts = user.contactsUnlocked || [];
-    const total = allContacts.length;
+    const allIds = user.contactsUnlocked || [];
+    const total = allIds.length;
 
-    const paginatedContacts = allContacts.slice(skip, skip + limit);
+    // ✅ FIX: Paginate the IDs first, then query only those
+    const pageIds = allIds.slice(skip, skip + limit);
+
+    const contacts = await User.find({ _id: { $in: pageIds } })
+      .select('email phone countryCode')
+      .lean();
 
     const enriched = await Promise.all(
-      paginatedContacts.map(async (contact) => {
-        const profile = await Profile.findOne({ userId: contact._id }).select('fullName photos').lean();
+      contacts.map(async (contact) => {
+        const profile = await Profile.findOne({ userId: contact._id })
+          .select('fullName photos')
+          .lean();
 
         return {
           _id: contact._id,
@@ -147,7 +154,10 @@ export const getUnlockedContacts = async (req, res) => {
           profile: profile
             ? {
                 fullName: profile.fullName,
-                photoUrl: profile.photos?.find((p) => p.isProfile)?.url || profile.photos?.[0]?.url || null,
+                photoUrl:
+                  profile.photos?.find((p) => p.isProfile)?.url ||
+                  profile.photos?.[0]?.url ||
+                  null,
               }
             : null,
         };

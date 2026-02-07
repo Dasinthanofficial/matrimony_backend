@@ -1,10 +1,16 @@
-// ===== FILE: ./controllers/adminController.js =====
-
+// ===== FIXED FILE: ./controllers/adminController.js =====
 import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Profile from '../models/Profile.js';
 import Report from '../models/Report.js';
 import AdminLog from '../models/AdminLog.js';
+import Interest from '../models/Interest.js'; // ✅ FIX: Added for cleanup
+import Shortlist from '../models/Shortlist.js'; // ✅ FIX: Added for cleanup
+import Notification from '../models/Notification.js'; // ✅ FIX: Added for cleanup
+import Message from '../models/Message.js'; // ✅ FIX: Added for cleanup
+import Conversation from '../models/Conversation.js'; // ✅ FIX: Added for cleanup
+import Subscription from '../models/Subscription.js'; // ✅ FIX: Added for cleanup
+import Payment from '../models/Payment.js'; // ✅ FIX: Added for cleanup
 import { handleControllerError } from '../utils/errors.js';
 import { parsePagination, formatPaginationResponse } from '../utils/pagination.js';
 
@@ -24,6 +30,37 @@ const logAdminAction = async (req, adminId, action, targetUserId, reason, metada
   } catch (e) {
     console.error('Error logging admin action:', e.message);
   }
+};
+
+// ✅ FIX: Extracted shared cleanup helper for user deletion
+const cleanupUserData = async (userId, session) => {
+  await Profile.deleteOne({ userId }).session(session);
+  await Interest.deleteMany({
+    $or: [{ senderId: userId }, { receiverId: userId }],
+  }).session(session);
+  await Shortlist.deleteMany({
+    $or: [{ userId }, { shortlistedUserId: userId }],
+  }).session(session);
+  await Notification.deleteMany({ userId }).session(session);
+  await Message.updateMany(
+    { $or: [{ senderId: userId }, { receiverId: userId }] },
+    { isDeleted: true, deletedAt: new Date() }
+  ).session(session);
+  await Subscription.deleteOne({ userId }).session(session);
+  await Payment.deleteMany({ userId }).session(session);
+
+  const userConversations = await Conversation.find({ participants: userId })
+    .select('_id')
+    .session(session);
+  for (const conv of userConversations) {
+    await Message.updateMany(
+      { conversationId: conv._id },
+      { isDeleted: true, deletedAt: new Date() }
+    ).session(session);
+  }
+  await Conversation.deleteMany({ participants: userId }).session(session);
+
+  await User.findByIdAndDelete(userId).session(session);
 };
 
 export const getAllUsers = async (req, res) => {
@@ -95,7 +132,6 @@ export const suspendUser = async (req, res) => {
       return res.status(400).json({ message: 'Invalid userId' });
     }
 
-    // Prevent self-suspension
     if (userId === req.user._id.toString()) {
       return res.status(400).json({ message: 'Cannot suspend yourself' });
     }
@@ -152,6 +188,7 @@ export const unsuspendUser = async (req, res) => {
   }
 };
 
+// ✅ FIX: Full cleanup on deleteUser
 export const deleteUser = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -165,7 +202,6 @@ export const deleteUser = async (req, res) => {
       return res.status(400).json({ message: 'Invalid userId' });
     }
 
-    // Prevent self-deletion
     if (userId === req.user._id.toString()) {
       await session.abortTransaction();
       return res.status(400).json({ message: 'Cannot delete yourself' });
@@ -177,15 +213,13 @@ export const deleteUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Delete profile and user atomically
-    await Profile.deleteOne({ userId }).session(session);
-    await User.findByIdAndDelete(userId).session(session);
+    await cleanupUserData(userId, session);
 
     await session.commitTransaction();
 
     await logAdminAction(req, req.user._id, 'user_deleted', userId, reason);
 
-    res.json({ message: 'User and profile deleted successfully' });
+    res.json({ message: 'User and all associated data deleted successfully' });
   } catch (e) {
     await session.abortTransaction();
     handleControllerError(res, e, 'Delete user');
@@ -307,6 +341,7 @@ export const getReportDetail = async (req, res) => {
   }
 };
 
+// ✅ FIX: Full cleanup on resolveReport deletion action
 export const resolveReport = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -326,7 +361,6 @@ export const resolveReport = async (req, res) => {
       return res.status(404).json({ message: 'Report not found' });
     }
 
-    // Update report
     report.status = 'resolved';
     report.action = action;
     report.resolvedBy = req.user._id;
@@ -334,16 +368,8 @@ export const resolveReport = async (req, res) => {
     report.resolutionNote = resolutionNote;
     await report.save({ session });
 
-    // Execute action
     if (action === 'warning') {
-      await logAdminAction(
-        req,
-        req.user._id,
-        'user_warned',
-        report.reportedUserId,
-        resolutionNote,
-        { reportId }
-      );
+      await logAdminAction(req, req.user._id, 'user_warned', report.reportedUserId, resolutionNote, { reportId });
     } else if (action === 'suspension') {
       await User.findByIdAndUpdate(
         report.reportedUserId,
@@ -354,25 +380,11 @@ export const resolveReport = async (req, res) => {
         },
         { session }
       );
-      await logAdminAction(
-        req,
-        req.user._id,
-        'user_suspended',
-        report.reportedUserId,
-        resolutionNote,
-        { reportId }
-      );
+      await logAdminAction(req, req.user._id, 'user_suspended', report.reportedUserId, resolutionNote, { reportId });
     } else if (action === 'deletion') {
-      await Profile.deleteOne({ userId: report.reportedUserId }).session(session);
-      await User.findByIdAndDelete(report.reportedUserId).session(session);
-      await logAdminAction(
-        req,
-        req.user._id,
-        'user_deleted',
-        report.reportedUserId,
-        resolutionNote,
-        { reportId }
-      );
+      // ✅ FIX: Full cleanup instead of just Profile + User
+      await cleanupUserData(report.reportedUserId, session);
+      await logAdminAction(req, req.user._id, 'user_deleted', report.reportedUserId, resolutionNote, { reportId });
     }
 
     await session.commitTransaction();
@@ -410,14 +422,7 @@ export const rejectReport = async (req, res) => {
       return res.status(404).json({ message: 'Report not found' });
     }
 
-    await logAdminAction(
-      req,
-      req.user._id,
-      'report_rejected',
-      report.reportedUserId,
-      resolutionNote,
-      { reportId }
-    );
+    await logAdminAction(req, req.user._id, 'report_rejected', report.reportedUserId, resolutionNote, { reportId });
 
     res.json({ message: 'Report rejected successfully', report });
   } catch (e) {
@@ -427,23 +432,16 @@ export const rejectReport = async (req, res) => {
 
 export const getDashboardStats = async (req, res) => {
   try {
-    const [
-      totalUsers,
-      suspendedUsers,
-      totalProfiles,
-      pendingReports,
-      resolvedReports,
-      recentUsers,
-      reportsByType,
-    ] = await Promise.all([
-      User.countDocuments(),
-      User.countDocuments({ isSuspended: true }),
-      Profile.countDocuments(),
-      Report.countDocuments({ status: 'pending' }),
-      Report.countDocuments({ status: 'resolved' }),
-      User.find().select('email createdAt').sort({ createdAt: -1 }).limit(5),
-      Report.aggregate([{ $group: { _id: '$reportType', count: { $sum: 1 } } }]),
-    ]);
+    const [totalUsers, suspendedUsers, totalProfiles, pendingReports, resolvedReports, recentUsers, reportsByType] =
+      await Promise.all([
+        User.countDocuments(),
+        User.countDocuments({ isSuspended: true }),
+        Profile.countDocuments(),
+        Report.countDocuments({ status: 'pending' }),
+        Report.countDocuments({ status: 'resolved' }),
+        User.find().select('email createdAt').sort({ createdAt: -1 }).limit(5),
+        Report.aggregate([{ $group: { _id: '$reportType', count: { $sum: 1 } } }]),
+      ]);
 
     res.json({
       stats: {

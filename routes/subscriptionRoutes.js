@@ -1,5 +1,6 @@
+// ===== FIXED FILE: ./routes/subscriptionRoutes.js =====
 import express from 'express';
-import { protect } from '../middleware/authMiddleware.js';
+import { protect, optionalAuth } from '../middleware/authMiddleware.js'; // ✅ FIX: Added optionalAuth
 import {
   getPlans,
   getMySubscription,
@@ -17,8 +18,8 @@ const router = express.Router();
 // Stripe webhook (NO auth)
 router.post('/webhook', handleWebhook);
 
-// Public
-router.get('/plans', getPlans);
+// ✅ FIX: Use optionalAuth so getPlans can read req.user if logged in
+router.get('/plans', optionalAuth, getPlans);
 
 // Protected
 router.get('/my-subscription', protect, getMySubscription);

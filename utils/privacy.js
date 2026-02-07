@@ -1,4 +1,4 @@
-// ===== FILE: ./utils/privacy.js =====
+// ===== UPDATED FILE: ./utils/privacy.js =====
 import { hasPremiumAccess } from './entitlements.js';
 
 const canSeePhotosByVisibility = ({ photoVisibility, isOwn, isPremium, isMatch }) => {
@@ -53,12 +53,10 @@ export const applyProfilePrivacy = ({ viewer, profile, isMatch = false }) => {
     };
   }
 
-  // Contact info flags
   const canSeePhone = isOwn || ps.showPhone === true;
   const canSeeEmail = isOwn || ps.showEmail === true;
   const canSeeIncome = isOwn || ps.showIncome === true;
 
-  // user contact (if populated)
   if (result.userId && typeof result.userId === 'object') {
     if (!canSeePhone) {
       delete result.userId.phone;
@@ -69,17 +67,14 @@ export const applyProfilePrivacy = ({ viewer, profile, isMatch = false }) => {
     }
   }
 
-  // ALSO protect top-level email if callers attach it (search used to do this)
   if (!canSeeEmail) {
     delete result.email;
   }
 
-  // profile income
   if (!canSeeIncome) {
     delete result.annualIncome;
   }
 
-  // Photos
   const canSeePhotos = canSeePhotosByVisibility({
     photoVisibility: ps.photoVisibility,
     isOwn,
@@ -90,6 +85,7 @@ export const applyProfilePrivacy = ({ viewer, profile, isMatch = false }) => {
   if (!canSeePhotos) {
     result.photos = [];
     result.photosLocked = true;
+    if ('photoUrl' in result) result.photoUrl = null;
   }
 
   result.viewerContext = { isOwn, isPremiumViewer: isPremium, isMatch, isRegistered };

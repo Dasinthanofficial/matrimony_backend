@@ -1,3 +1,4 @@
+// ===== FIXED FILE: ./server.js =====
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -41,14 +42,10 @@ app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173', creden
 
 app.use('/uploads', express.static('uploads'));
 
-// Body parsers
-// Stripe webhook signature verification requires the *raw bytes* of the request.
-// We capture them into req.rawBody ONLY for the webhook route.
 app.use(
   express.json({
     limit: '10mb',
     verify: (req, _res, buf) => {
-      // originalUrl may include querystring; startsWith is safer than ===
       if (req.originalUrl && req.originalUrl.startsWith('/api/subscriptions/webhook')) {
         req.rawBody = buf;
       }
@@ -113,15 +110,26 @@ mongoose
     process.exit(1);
   });
 
-const shutdown = (signal) => {
+// ✅ FIX: Single shutdown handler — no double cleanup
+const shutdown = async (signal) => {
   console.log(`${signal} received. Shutting down gracefully...`);
   socketInstance?.cleanup?.();
-  httpServer.close(() => {
-    mongoose.connection.close(false, () => {
+  httpServer.close(async () => {
+    try {
+      // ✅ FIX: Use promise-based close for Mongoose 8.x
+      await mongoose.connection.close();
       console.log('Server closed.');
-      process.exit(0);
-    });
+    } catch (e) {
+      console.error('Error closing MongoDB connection:', e.message);
+    }
+    process.exit(0);
   });
+
+  // Force exit after 10s if graceful fails
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

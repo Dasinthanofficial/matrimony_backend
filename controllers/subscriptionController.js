@@ -28,7 +28,6 @@ const getStripeClient = () => {
   const key = process.env.STRIPE_SECRET_KEY;
 
   if (!key) {
-    // In production you may want to throw hard; in dev we just disable payments gracefully.
     if (process.env.NODE_ENV === 'production') {
       throw new Error('STRIPE_SECRET_KEY is required in production');
     }
@@ -38,8 +37,6 @@ const getStripeClient = () => {
   if (stripeClient) return stripeClient;
 
   stripeClient = new Stripe(key, {
-    // Pinning apiVersion is recommended; adjust if your Stripe lib/version requires a different string.
-    // If your Stripe package complains, you can remove apiVersion and it will use package default.
     apiVersion: '2024-06-20',
   });
 
@@ -56,7 +53,6 @@ const requireStripe = (res) => {
   try {
     stripe = getStripeClient();
   } catch (e) {
-    // production strict mode errors
     res.status(500).json({
       message: 'Payment system misconfigured',
       code: 'PAYMENT_MISCONFIGURED',
@@ -143,10 +139,9 @@ const computeLocalPeriod = (planId) => {
   return { startDate, endDate };
 };
 
-// Decide what currency to CHARGE in (must match Stripe currency)
 const getChargePricing = ({ planId, countryCurrency }) => {
   const desired = String(countryCurrency || 'USD').toUpperCase();
-  const stripeCurrency = getStripeCurrency(desired); // lowercase
+  const stripeCurrency = getStripeCurrency(desired);
   const chargeCurrency = stripeCurrency.toUpperCase();
 
   const usd = basePricesUSD[planId];
@@ -171,7 +166,6 @@ export const getPlans = async (req, res) => {
     const currencyInfo = getCurrencyFromCountryCode(countryCode);
     const prices = getPricesInCurrency(currencyInfo.currency);
 
-    // Stripe configured based on current env at request time (not import time)
     const stripeConfigured = Boolean(process.env.STRIPE_SECRET_KEY);
 
     res.json({
@@ -316,10 +310,9 @@ export const createCheckoutSession = async (req, res) => {
       mode: 'subscription',
       success_url: `${process.env.CLIENT_URL}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_URL}/pricing?cancelled=true`,
-      metadata: { userId: userId.toString(), planId, currency: chargeCurrency }, // store actual charge currency
+      metadata: { userId: userId.toString(), planId, currency: chargeCurrency },
     });
 
-    // Optional: store last shown price (not required)
     await Subscription.findByIdAndUpdate(subDoc._id, { currency: chargeCurrency, amount: amountMajor });
 
     res.json({ sessionId: session.id, url: session.url, currency: chargeCurrency, amount: amountMajor });
@@ -328,8 +321,6 @@ export const createCheckoutSession = async (req, res) => {
   }
 };
 
-// NOTE: This is a ONE-TIME charge flow. It does NOT create a Stripe subscription.
-// If you keep it, treat it as time-bound premium without auto-renew.
 export const createPaymentIntent = async (req, res) => {
   try {
     const stripe = requireStripe(res);
@@ -398,6 +389,7 @@ export const verifyPayment = async (req, res) => {
 
     const { paymentIntentId, sessionId } = req.body;
     const userId = req.user._id;
+    const expectedUserId = userId.toString();
 
     let planId;
     let customerId;
@@ -406,18 +398,35 @@ export const verifyPayment = async (req, res) => {
 
     if (sessionId) {
       const session = await stripe.checkout.sessions.retrieve(sessionId);
+
       if (session.payment_status !== 'paid' && session.payment_status !== 'no_payment_required') {
         return res.status(400).json({ message: 'Payment not completed' });
       }
+
+      if (!session.metadata?.userId || session.metadata.userId !== expectedUserId) {
+        return res.status(403).json({ message: 'Session does not belong to user' });
+      }
+
       planId = session.metadata?.planId;
+      if (!planId) return res.status(400).json({ message: 'Missing plan in session metadata' });
+
       customerId = session.customer;
       stripeSubscriptionId = session.subscription || undefined;
       chargeCurrency = (session.metadata?.currency || session.currency || 'USD').toUpperCase();
     } else if (paymentIntentId) {
       const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-      if (paymentIntent.status !== 'succeeded') return res.status(400).json({ message: 'Payment not successful' });
+
+      if (paymentIntent.status !== 'succeeded') {
+        return res.status(400).json({ message: 'Payment not successful' });
+      }
+
+      if (!paymentIntent.metadata?.userId || paymentIntent.metadata.userId !== expectedUserId) {
+        return res.status(403).json({ message: 'Payment does not belong to user' });
+      }
 
       planId = paymentIntent.metadata?.planId;
+      if (!planId) return res.status(400).json({ message: 'Missing plan in payment metadata' });
+
       customerId = paymentIntent.customer;
       chargeCurrency = (paymentIntent.metadata?.currency || paymentIntent.currency || 'USD').toUpperCase();
 
@@ -431,6 +440,11 @@ export const verifyPayment = async (req, res) => {
 
     if (!planId || !['monthly', 'yearly'].includes(planId)) {
       return res.status(400).json({ message: 'Invalid plan in payment metadata' });
+    }
+
+    const subDoc = await Subscription.findOne({ userId }).select('stripeCustomerId').lean();
+    if (subDoc?.stripeCustomerId && customerId && subDoc.stripeCustomerId !== customerId) {
+      return res.status(403).json({ message: 'Payment customer mismatch' });
     }
 
     const stripePeriod = await getStripePeriodFromSubscriptionId(stripeSubscriptionId, stripe);
@@ -448,7 +462,7 @@ export const verifyPayment = async (req, res) => {
         stripeSubscriptionId: stripeSubscriptionId || undefined,
         startDate,
         endDate,
-        autoRenew: Boolean(stripeSubscriptionId), // true only for real Stripe subscriptions
+        autoRenew: Boolean(stripeSubscriptionId),
         currency: chargeCurrency || 'USD',
         features: getPremiumFeatures(planId),
       },
@@ -479,7 +493,6 @@ export const cancelSubscription = async (req, res) => {
     const subscription = await Subscription.findOne({ userId });
     if (!subscription || subscription.plan === 'free') return res.status(400).json({ message: 'No active subscription' });
 
-    // Only call Stripe if we have a Stripe subscription id and stripe is configured
     const stripe = getStripeClient();
     if (subscription.stripeSubscriptionId && stripe) {
       try {
@@ -489,7 +502,7 @@ export const cancelSubscription = async (req, res) => {
       }
     }
 
-    subscription.status = 'active'; // keep access until endDate
+    subscription.status = 'active';
     subscription.cancelledAt = new Date();
     subscription.autoRenew = false;
     await subscription.save();
@@ -606,18 +619,15 @@ export const handleWebhook = async (req, res) => {
       }
 
       case 'customer.subscription.updated': {
-        const s = event.data.object; // Stripe subscription
+        const s = event.data.object;
         const customerId = s.customer;
 
         const sub = await Subscription.findOne({ stripeCustomerId: customerId });
         if (sub) {
           sub.autoRenew = !s.cancel_at_period_end;
           if (s.cancel_at_period_end && !sub.cancelledAt) sub.cancelledAt = new Date();
-
-          // Keep local endDate aligned to Stripe period end
           if (s.current_period_end) sub.endDate = new Date(s.current_period_end * 1000);
 
-          // map some statuses
           if (s.status === 'past_due') sub.status = 'past_due';
           if (s.status === 'canceled') sub.status = 'cancelled';
           if (s.status === 'active' || s.status === 'trialing') sub.status = 'active';

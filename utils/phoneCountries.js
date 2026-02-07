@@ -1,4 +1,3 @@
-// ===== FILE: src/utils/phoneCountries.js =====
 import { getCountries, getCountryCallingCode } from 'libphonenumber-js';
 
 const displayNames =
@@ -7,7 +6,6 @@ const displayNames =
     : null;
 
 const isoToFlagEmoji = (iso2) => {
-  // "IN" -> 🇮🇳
   if (!iso2 || iso2.length !== 2) return '';
   const codePoints = iso2
     .toUpperCase()
@@ -27,7 +25,6 @@ export const PHONE_COUNTRIES = getCountries()
     };
   })
   .sort((a, b) => {
-    // Put India first (optional)
     if (a.iso2 === 'IN') return -1;
     if (b.iso2 === 'IN') return 1;
     return a.name.localeCompare(b.name);

@@ -1,38 +1,35 @@
-// ===== FILE: server/middleware/rateLimiter.js =====
+// ===== FIXED FILE: server/middleware/rateLimiter.js =====
 import rateLimit from 'express-rate-limit';
 
-// Check if in development mode
 const isDev = process.env.NODE_ENV !== 'production';
 
-// General API rate limiter - More lenient
+// ✅ FIX: Removed redundant `skip` — apiLimiter is already conditionally mounted in server.js
 export const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 1000 : 100, // 1000 requests in dev, 100 in production
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: {
     message: 'Too many requests, please try again later',
     retryAfter: 15,
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => isDev, // Skip rate limiting entirely in development
 });
 
-// Auth rate limiter - For login/register
+// ✅ FIX: Auth limiter still needs skip for dev since it's always mounted
 export const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 100 : 10, // 100 attempts in dev, 10 in production
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 100 : 10,
   message: {
     message: 'Too many authentication attempts, please try again later',
     retryAfter: 15,
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => isDev,
+  skip: () => isDev,
 });
 
-// Strict limiter for sensitive operations
 export const strictLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60 * 60 * 1000,
   max: isDev ? 100 : 5,
   message: {
     message: 'Too many attempts, please try again later',
@@ -40,11 +37,7 @@ export const strictLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => isDev,
+  skip: () => isDev,
 });
 
-export default {
-  apiLimiter,
-  authLimiter,
-  strictLimiter,
-};
+export default { apiLimiter, authLimiter, strictLimiter };

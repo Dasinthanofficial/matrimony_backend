@@ -1,4 +1,3 @@
-// ===== FILE: ./validators/searchValidator.js =====
 import { query } from 'express-validator';
 import { LIMITS, GENDERS, MARITAL_STATUSES, DIET_OPTIONS } from '../utils/constants.js';
 
@@ -33,6 +32,13 @@ export const searchProfilesValidator = [
   query('state').optional().trim().isLength({ max: 100 }).withMessage('State must be less than 100 characters'),
 
   query('country').optional().trim().isLength({ max: 100 }).withMessage('Country must be less than 100 characters'),
+
+  // ✅ Added: fields that frontend sends (or backend supports)
+  query('education').optional().trim().isLength({ max: 50 }).withMessage('Education must be less than 50 characters'),
+  query('occupation').optional().trim().isLength({ max: 100 }).withMessage('Occupation must be less than 100 characters'),
+  query('caste').optional().trim().isLength({ max: 50 }).withMessage('Caste must be less than 50 characters'),
+  query('smoking').optional().trim().isLength({ max: 20 }).withMessage('Smoking must be less than 20 characters'),
+  query('drinking').optional().trim().isLength({ max: 20 }).withMessage('Drinking must be less than 20 characters'),
 
   query('sortBy')
     .optional()

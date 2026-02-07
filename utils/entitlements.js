@@ -1,4 +1,4 @@
-// ===== FILE: ./utils/entitlements.js =====
+// ===== FIXED FILE: ./utils/entitlements.js =====
 export const hasPremiumAccess = (user) => {
   if (!user) return false;
 
@@ -10,7 +10,6 @@ export const hasPremiumAccess = (user) => {
     !Number.isNaN(endDate.valueOf()) &&
     new Date() < endDate;
 
-  // Only treat subscription snapshot as source-of-truth if it represents paid access
   const hasPaidSnapshot =
     user.subscription?.plan === 'monthly' ||
     user.subscription?.plan === 'yearly' ||
@@ -18,9 +17,16 @@ export const hasPremiumAccess = (user) => {
 
   if (hasPaidSnapshot) return subActive;
 
+  // ✅ FIX: Only trust premiumExpiry if it exists AND is in the future
   if (user.premiumExpiry && new Date() < new Date(user.premiumExpiry)) return true;
 
-  return Boolean(user.isPremium);
+  // ✅ FIX: Only trust isPremium if premiumExpiry exists and is valid
+  // Bare isPremium without expiry should NOT grant access (prevents stale flag)
+  if (user.isPremium && user.premiumExpiry) {
+    return new Date() < new Date(user.premiumExpiry);
+  }
+
+  return false;
 };
 
 export const isSubscriptionExpired = (user) => {

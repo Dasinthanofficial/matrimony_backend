@@ -15,32 +15,27 @@ export const sendInterest = async (req, res) => {
     const { receiverId, message } = req.body;
     const senderId = req.user._id;
 
-    if (!receiverId) {
-      return res.status(400).json({ message: 'Receiver ID required' });
-    }
+    if (!receiverId) return res.status(400).json({ message: 'Receiver ID required' });
+    if (!mongoose.Types.ObjectId.isValid(receiverId)) return res.status(400).json({ message: 'Invalid receiver ID' });
+    if (senderId.toString() === receiverId.toString()) return res.status(400).json({ message: 'Cannot send interest to yourself' });
 
-    if (!mongoose.Types.ObjectId.isValid(receiverId)) {
-      return res.status(400).json({ message: 'Invalid receiver ID' });
-    }
-
-    if (senderId.toString() === receiverId.toString()) {
-      return res.status(400).json({ message: 'Cannot send interest to yourself' });
-    }
-
-    // Validate message length
     if (message && message.length > LIMITS.MAX_INTEREST_MESSAGE) {
-      return res.status(400).json({
-        message: `Message too long (max ${LIMITS.MAX_INTEREST_MESSAGE} characters)`,
-      });
+      return res.status(400).json({ message: `Message too long (max ${LIMITS.MAX_INTEREST_MESSAGE} characters)` });
     }
 
-    // Check if receiver exists
     const receiverExists = await User.exists({ _id: receiverId });
-    if (!receiverExists) {
-      return res.status(404).json({ message: 'User not found' });
+    if (!receiverExists) return res.status(404).json({ message: 'User not found' });
+
+    // ✅ FIX: Check if receiver has blocked the sender (reverse direction)
+    const blockedBySender = await Interest.findOne({
+      senderId: receiverId,
+      receiverId: senderId,
+      status: 'blocked',
+    });
+    if (blockedBySender) {
+      return res.status(403).json({ message: 'Cannot send interest to this user' });
     }
 
-    // Check if already sent
     const existing = await Interest.findOne({ senderId, receiverId });
     if (existing) {
       return res.status(400).json({
@@ -50,7 +45,6 @@ export const sendInterest = async (req, res) => {
       });
     }
 
-    // Get profiles
     const [senderProfile, receiverProfile] = await Promise.all([
       Profile.findOne({ userId: senderId }).select('_id'),
       Profile.findOne({ userId: receiverId }).select('_id'),
@@ -64,10 +58,7 @@ export const sendInterest = async (req, res) => {
       message: message?.trim(),
     });
 
-    res.status(201).json({
-      message: 'Interest sent successfully',
-      interest,
-    });
+    res.status(201).json({ message: 'Interest sent successfully', interest });
   } catch (e) {
     handleControllerError(res, e, 'Send interest');
   }
