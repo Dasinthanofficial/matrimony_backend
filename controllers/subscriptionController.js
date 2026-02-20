@@ -1,11 +1,13 @@
 // server/controllers/subscriptionController.js
 import mongoose from 'mongoose';
+
 import Subscription from '../models/Subscription.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.js';
 import Payment from '../models/Payment.js';
 import User from '../models/User.js';
-import { handleControllerError } from '../utils/errors.js';
-import { formatPayHereAmount } from '../utils/payhere.js';
+
+import { handleControllerError, AppError } from '../utils/errors.js';
+import { formatPayHereAmount, buildPayHereHash } from '../utils/payhere.js';
 
 const FREE_FEATURES = {
   unlimitedMessages: false,
@@ -18,42 +20,52 @@ const FREE_FEATURES = {
   noAds: false,
 };
 
-const payhereCheckoutUrl = () =>
-  process.env.PAYHERE_SANDBOX === 'true'
+const payhereCheckoutUrl = () => {
+  // optional override
+  if (process.env.PAYHERE_CHECKOUT_URL) return process.env.PAYHERE_CHECKOUT_URL;
+
+  return process.env.PAYHERE_SANDBOX === 'true'
     ? 'https://sandbox.payhere.lk/pay/checkout'
     : 'https://www.payhere.lk/pay/checkout';
+};
+
+const resolveServerUrl = () => {
+  const url = process.env.SERVER_URL || process.env.API_URL;
+  return url ? String(url).replace(/\/+$/, '') : null;
+};
+
+const resolveClientUrl = () => {
+  const url = process.env.CLIENT_URL;
+  return url ? String(url).replace(/\/+$/, '') : null;
+};
 
 const ensurePayHereConfigured = () => {
-  if (!process.env.PAYHERE_MERCHANT_ID || !process.env.PAYHERE_MERCHANT_SECRET) {
-    const e = new Error('PayHere not configured');
-    e.code = 'PAYHERE_NOT_CONFIGURED';
-    e.statusCode = 503;
-    throw e;
+  const merchantId = process.env.PAYHERE_MERCHANT_ID;
+  const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
+
+  if (!merchantId || !merchantSecret) {
+    throw new AppError('PayHere not configured', 503, 'PAYHERE_NOT_CONFIGURED');
   }
-  if (!process.env.CLIENT_URL) {
-    const e = new Error('CLIENT_URL not configured');
-    e.code = 'CLIENT_URL_MISSING';
-    e.statusCode = 500;
-    throw e;
+
+  const clientUrl = resolveClientUrl();
+  if (!clientUrl) {
+    throw new AppError('CLIENT_URL not configured', 500, 'CLIENT_URL_MISSING');
   }
-  if (!process.env.SERVER_URL) {
-    const e = new Error('SERVER_URL not configured');
-    e.code = 'SERVER_URL_MISSING';
-    e.statusCode = 500;
-    throw e;
+
+  const serverUrl = resolveServerUrl();
+  if (!serverUrl) {
+    throw new AppError('SERVER_URL (or API_URL) not configured', 500, 'SERVER_URL_MISSING');
   }
+
+  return { merchantId, merchantSecret, clientUrl, serverUrl };
 };
 
-const featuresArrayToFlags = (features = []) => {
-  const flags = {};
-  for (const f of features) flags[String(f)] = true;
-  return flags;
-};
-
-// PUBLIC (legacy; your frontend uses GET /api/plans instead)
+// GET /api/subscriptions/plans  (legacy; your frontend uses /api/plans)
 export const getPlans = async (req, res) => {
   try {
-    const plans = await SubscriptionPlan.find({ isActive: true }).sort({ sortOrder: 1, price: 1 }).lean();
+    const plans = await SubscriptionPlan.find({ isActive: true })
+      .sort({ sortOrder: 1, price: 1 })
+      .lean();
 
     const payhereConfigured = Boolean(process.env.PAYHERE_MERCHANT_ID && process.env.PAYHERE_MERCHANT_SECRET);
 
@@ -63,7 +75,7 @@ export const getPlans = async (req, res) => {
   }
 };
 
-// PROTECTED
+// GET /api/subscriptions/my-subscription
 export const getMySubscription = async (req, res) => {
   try {
     const subscription = await Subscription.findOneAndUpdate(
@@ -100,11 +112,11 @@ export const getMySubscription = async (req, res) => {
   }
 };
 
-// ✅ PayHere checkout creator (dynamic plan support)
+// POST /api/subscriptions/create-checkout
 // Body: { planId: "<SubscriptionPlan._id>" } OR { planId: "<SubscriptionPlan.code>" }
 export const createCheckoutSession = async (req, res) => {
   try {
-    ensurePayHereConfigured();
+    const { merchantId, merchantSecret, clientUrl, serverUrl } = ensurePayHereConfigured();
 
     const { planId } = req.body || {};
     const userId = req.user._id;
@@ -118,21 +130,30 @@ export const createCheckoutSession = async (req, res) => {
 
     if (!plan || !plan.isActive) return res.status(404).json({ message: 'Plan not found' });
 
-    // If you only want PayHere in LKR, enforce here:
     const currency = String(plan.currency || 'LKR').toUpperCase();
     if (currency !== 'LKR') {
       return res.status(400).json({ message: 'Only LKR plans are supported with PayHere in this setup.' });
     }
 
     const amountMajor = Number(plan.price);
-    if (!Number.isFinite(amountMajor) || amountMajor < 0) return res.status(400).json({ message: 'Invalid plan price' });
+    if (!Number.isFinite(amountMajor) || amountMajor < 0) {
+      return res.status(400).json({ message: 'Invalid plan price' });
+    }
+
+    // ✅ Do not send free plans to PayHere
+    if (amountMajor === 0) {
+      return res.status(400).json({
+        message: 'This plan is free and does not require payment.',
+        code: 'FREE_PLAN_NO_CHECKOUT',
+      });
+    }
 
     const user = await User.findById(userId).select('fullName email phone countryCode').lean();
 
     // Create local payment first (order_id will be this payment._id)
     const payment = await Payment.create({
       userId,
-      plan: plan.code, // ✅ plan code stored here
+      plan: plan.code,
       status: 'pending',
       amount: amountMajor,
       currency,
@@ -150,17 +171,18 @@ export const createCheckoutSession = async (req, res) => {
     });
 
     const orderId = String(payment._id);
+    const amountStr = formatPayHereAmount(amountMajor);
 
     const payload = {
-      merchant_id: process.env.PAYHERE_MERCHANT_ID,
-      return_url: `${process.env.CLIENT_URL}/subscription/success?order_id=${orderId}`,
-      cancel_url: `${process.env.CLIENT_URL}/pricing?cancelled=true`,
-      notify_url: `${process.env.SERVER_URL}/api/payments/payhere/notify`,
+      merchant_id: merchantId,
+      return_url: `${clientUrl}/subscription/success?order_id=${encodeURIComponent(orderId)}`,
+      cancel_url: `${clientUrl}/pricing?cancelled=true`,
+      notify_url: `${serverUrl}/api/payments/payhere/notify`,
 
       order_id: orderId,
       items: plan.name,
       currency,
-      amount: formatPayHereAmount(amountMajor),
+      amount: amountStr,
 
       first_name: (user?.fullName || 'User').split(' ')[0] || 'User',
       last_name: (user?.fullName || '').split(' ').slice(1).join(' ') || '-',
@@ -171,7 +193,17 @@ export const createCheckoutSession = async (req, res) => {
       country: 'Sri Lanka',
     };
 
-    payment.payhere.orderId = payload.order_id;
+    // ✅ REQUIRED for many PayHere accounts
+    payload.hash = buildPayHereHash({
+      merchant_id: merchantId,
+      order_id: orderId,
+      amount: amountStr,
+      currency,
+      merchant_secret: merchantSecret,
+    });
+
+    payment.payhere = payment.payhere || {};
+    payment.payhere.orderId = orderId;
     await payment.save();
 
     return res.json({
@@ -187,13 +219,12 @@ export const createCheckoutSession = async (req, res) => {
   }
 };
 
-// Stripe-only endpoint removed (kept to avoid frontend crash if something still calls it)
+// Stripe removed
 export const createPaymentIntent = async (_req, res) => {
   return res.status(410).json({ message: 'Stripe removed. Use PayHere checkout.', code: 'STRIPE_REMOVED' });
 };
 
-// ✅ Verify payment for success page (polling-friendly)
-// Body: { orderId }
+// POST /api/subscriptions/verify
 export const verifyPayment = async (req, res) => {
   try {
     const { orderId } = req.body || {};
@@ -205,7 +236,6 @@ export const verifyPayment = async (req, res) => {
 
     const subscription = await Subscription.findOne({ userId: req.user._id });
 
-    // If payment not succeeded and subscription not active yet => frontend should keep polling
     if (payment.status !== 'succeeded' && (!subscription || !subscription.isActive())) {
       return res.status(202).json({ status: payment.status, payment: payment.toObject(), subscription: null });
     }
@@ -229,7 +259,6 @@ export const cancelSubscription = async (req, res) => {
       return res.status(400).json({ message: 'No active subscription' });
     }
 
-    // PayHere one-time flow: no gateway cancel; just disable autoRenew
     subscription.status = 'active';
     subscription.cancelledAt = new Date();
     subscription.autoRenew = false;
@@ -288,7 +317,6 @@ export const checkFeatureAccess = async (req, res) => {
   }
 };
 
-// Stripe webhook removed
 export const handleWebhook = async (_req, res) => {
   return res.status(410).json({ message: 'Stripe webhook removed. Using PayHere notify_url.', code: 'STRIPE_REMOVED' });
 };
