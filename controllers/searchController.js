@@ -2,6 +2,7 @@
 import Profile from '../models/Profile.js';
 import User from '../models/User.js';
 import Interest from '../models/Interest.js';
+import calculateMatchScore from '../utils/calculateMatchScore.js'; // ✅ ADDED: Import for match score
 import { handleControllerError } from '../utils/errors.js';
 import { parsePagination, formatPaginationResponse } from '../utils/pagination.js';
 import { LIMITS } from '../utils/constants.js';
@@ -95,13 +96,21 @@ const formatProfileWithUserData = async (profile, viewer) => {
     completionDetails: profile.completionDetails || {},
     lastActive: profile.lastActive,
     privacySettings: profile.privacySettings,
-    // ✅ FIX: pass agency tag through for ProfileCard
     isAgencyManaged: profile.isAgencyManaged || false,
     agencyId: profile.agencyId || null,
     agencyNameTag: profile.agencyNameTag || null,
     successFee: profile.successFee,
     successFeeCurrency: profile.successFeeCurrency,
   };
+
+  // ✅ Fetch viewer's profile for match score calculation
+  const viewerProfile = viewer ? await Profile.findOne({ userId: viewer._id }).lean() : null;
+  const isOwn = viewer?._id && String(profile.userId) === String(viewer._id);
+
+  // ✅ Calculate Match Score
+  if (viewerProfile && !isOwn) {
+    raw.matchScore = calculateMatchScore(viewerProfile, raw);
+  }
 
   const matchSet = await buildMatchSet(viewer?._id, [profile.userId]);
   const isMatch = matchSet.has(profile.userId?.toString());
@@ -128,6 +137,9 @@ const formatProfilesWithUserData = async (profiles, viewer) => {
   });
 
   const matchSet = await buildMatchSet(viewer?._id, userIds);
+
+  // ✅ Fetch viewer profile ONCE for batch scoring
+  const viewerProfile = viewer ? await Profile.findOne({ userId: viewer._id }).lean() : null;
 
   return profiles.map((profile) => {
     const user = userMap[profile.userId?.toString()] || null;
@@ -185,6 +197,13 @@ const formatProfilesWithUserData = async (profiles, viewer) => {
     };
 
     const isMatch = matchSet.has(profile.userId?.toString());
+    const isOwn = viewer?._id && String(profile.userId) === String(viewer._id);
+
+    // ✅ ADDED: Calculate match score if viewer has a profile
+    if (viewerProfile && !isOwn) {
+      raw.matchScore = calculateMatchScore(viewerProfile, raw);
+    }
+
     const safe = applyProfilePrivacy({ viewer, profile: raw, isMatch });
     delete safe.privacySettings;
     if (safe.photosLocked) safe.photoUrl = null;
@@ -216,7 +235,6 @@ export const searchProfiles = async (req, res) => {
       sortBy = 'createdAt', sortOrder = 'desc',
     } = req.query;
 
-    // ✅ FIX: use base filter
     const query = baseSearchFilter(viewerId);
 
     if (gender && gender !== 'all') query.gender = gender;

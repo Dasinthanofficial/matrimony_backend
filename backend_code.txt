@@ -3606,8 +3606,9 @@ router.get('/history', protect, getPaymentHistory);
 router.get('/check-feature/:feature', protect, checkFeatureAccess);
 
 export default router;===== FILE: ./routes/agencyProfileRoutes.js =====
+// ===== FILE: ./routes/agencyProfileRoutes.js =====
 import express from 'express';
-import { requireAuth } from '../middleware/requireAuth.js'; // <-- keep YOUR real path here
+import { protect as requireAuth } from '../middleware/authMiddleware.js'; // ✅ FIX: Correct import
 import { requireAgency } from '../middleware/requireAgency.js';
 
 import {
@@ -3619,10 +3620,10 @@ import {
 
 const router = express.Router();
 
-router.post('/agency/profiles', requireAuth, requireAgency, createAgencyProfile);
-router.get('/agency/profiles', requireAuth, requireAgency, listAgencyProfiles);
-router.patch('/agency/profiles/:id', requireAuth, requireAgency, updateAgencyProfile);
-router.delete('/agency/profiles/:id', requireAuth, requireAgency, deleteAgencyProfile);
+router.post('/profiles', requireAuth, requireAgency, createAgencyProfile);
+router.get('/profiles', requireAuth, requireAgency, listAgencyProfiles);
+router.patch('/profiles/:id', requireAuth, requireAgency, updateAgencyProfile);
+router.delete('/profiles/:id', requireAuth, requireAgency, deleteAgencyProfile);
 
 export default router;===== FILE: ./routes/agencyMarketplaceRoutes.js =====
 // ===== FILE: ./routes/agencyMarketplaceRoutes.js =====
@@ -3825,6 +3826,17 @@ router.get('/', protect, admin, listAgencyLevelRules);
 router.post('/', protect, admin, createAgencyLevelRule);
 router.put('/:id', protect, admin, updateAgencyLevelRule);
 router.delete('/:id', protect, admin, deleteAgencyLevelRule);
+
+export default router;===== FILE: ./routes/dashboardRoutes.js =====
+// ===== FILE: ./routes/dashboardRoutes.js =====
+import express from 'express';
+import { protect } from '../middleware/authMiddleware.js';
+import { getDashboardSummary, getRecentVisitors } from '../controllers/dashboardController.js';
+
+const router = express.Router();
+
+router.get('/summary', protect, getDashboardSummary);
+router.get('/visitors', protect, getRecentVisitors);
 
 export default router;===== FILE: ./routes/adminAgencyReviewRoutes.js =====
 import { Router } from 'express';
@@ -4722,12 +4734,26 @@ const socketHandler = (io) => {
 
 export default socketHandler;===== FILE: ./server.js =====
 // ===== FILE: ./server.js =====
+
+// 🔴 CRITICAL: Must be FIRST import — loads .env before ANY other module runs
+import 'dotenv/config';
+
+// 🔴 Catch ALL silent crashes — add before everything else
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[unhandledRejection] at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -4746,16 +4772,13 @@ import paymentRoutes from './routes/paymentRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
-
 import payhereRoutes from './routes/payhereRoutes.js';
 import planRoutes from './routes/planRoutes.js';
 
-// marketplace
 import agencyMarketplaceRoutes from './routes/agencyMarketplaceRoutes.js';
 import marketplacePaymentRoutes from './routes/marketplacePaymentRoutes.js';
 import adminFinanceRoutes from './routes/adminFinanceRoutes.js';
 
-// reviews + reputation + levels + verified badge + payments(webhook)
 import agencyReviewRoutes from './routes/agencyReviewRoutes.js';
 import agencyReputationRoutes from './routes/agencyReputationRoutes.js';
 import adminAgencyLevelRoutes from './routes/adminAgencyLevelRoutes.js';
@@ -4765,27 +4788,29 @@ import agencyEntitlementPaymentRoutes from './routes/agencyEntitlementPaymentRou
 
 import agencyOrderRoutes from './routes/agencyOrderRoutes.js';
 import marriageSuccessRoutes from './routes/marriageSuccessRoutes.js';
-
-// agency dashboard routes (profiles, etc.)
 import agencyRoutes from './routes/agencyRoutes.js';
-
-// jobs
-import { startPayoutProcessor } from './jobs/payoutProcessor.js';
-
 import userRoutes from './routes/userRoutes.js';
-
-// public feedback + (optional) public agency services
 import agencyFeedbackRoutes from './routes/agencyFeedbackRoutes.js';
 import agencyPublicRoutes from './routes/agencyPublicRoutes.js';
 
-dotenv.config();
+import { startPayoutProcessor } from './jobs/payoutProcessor.js';
+
+import dashboardRoutes from './routes/dashboardRoutes.js';
+// ===== ENV VALIDATION =====
+// 🔴 Fail fast with a clear message if required env vars are missing
+const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+if (missingEnv.length > 0) {
+  console.error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
 
 const app = express();
 const httpServer = createServer(app);
 
 const allowedOrigins = [
-  process.env.CLIENT_URL || 'http://localhost:5173',
-  'https://matrimony-frontend-4zqd.vercel.app',
+  process.env.CLIENT_URL,
+  
 ].filter(Boolean);
 
 const io = new Server(httpServer, {
@@ -4796,24 +4821,17 @@ const socketInstance = socketHandler(io);
 app.set('io', io);
 app.set('socketInstance', socketInstance);
 
+// ===== MIDDLEWARE =====
 app.use(helmet());
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-  })
-);
-
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use('/uploads', express.static('uploads'));
-
 app.use(
   express.json({
     limit: '10mb',
     verify: (req, _res, buf) => {
       if (
-        req.originalUrl &&
-        (req.originalUrl.startsWith('/api/subscriptions/webhook') ||
-          req.originalUrl.startsWith('/api/payments/webhook'))
+        req.originalUrl?.startsWith('/api/subscriptions/webhook') ||
+        req.originalUrl?.startsWith('/api/payments/webhook')
       ) {
         req.rawBody = buf;
       }
@@ -4823,15 +4841,19 @@ app.use(
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 
-if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
+if (process.env.NODE_ENV !== 'production') {
+  app.use(morgan('dev'));
+}
 
-const isDev = process.env.NODE_ENV !== 'production';
-if (!isDev) app.use('/api', apiLimiter);
+if (process.env.NODE_ENV === 'production') {
+  app.use('/api', apiLimiter);
+}
 
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 
+// ===== HEALTH CHECK =====
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -4848,20 +4870,16 @@ app.use('/api/interests', interestRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 
-// payments
 app.use('/api/payments', paymentRoutes);
 app.use('/api/payments', marketplacePaymentRoutes);
 app.use('/api/payments/payhere', payhereRoutes);
 app.use('/api/payments/agency', agencyEntitlementPaymentRoutes);
 
-// public plans
 app.use('/api/plans', planRoutes);
 
-// public agency reviews + reputation
 app.use('/api/agency/:agencyId/reviews', agencyReviewRoutes);
 app.use('/api/agency/:agencyId/reputation', agencyReputationRoutes);
 
-// admin
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin/finance', adminFinanceRoutes);
 app.use('/api/admin/agency-levels', adminAgencyLevelRoutes);
@@ -4870,59 +4888,56 @@ app.use('/api/admin/agency-reviews', adminAgencyReviewRoutes);
 
 app.use('/api/reports', reportRoutes);
 app.use('/api/notifications', notificationRoutes);
-
 app.use('/api/agency-orders', agencyOrderRoutes);
 app.use('/api/marriage-success', marriageSuccessRoutes);
 
-// public marketplace routes first
 app.use('/api/agency', agencyMarketplaceRoutes);
-
-// protected agency dashboard routes
 app.use('/api/agency', agencyRoutes);
 
-// users
 app.use('/api/users', userRoutes);
 
-// IMPORTANT: these MUST be before 404
 app.use('/api', agencyFeedbackRoutes);
 app.use('/api', agencyPublicRoutes);
 
-// 404 — last normal middleware
+// ===== 404 =====
 app.use((req, res) => {
   res.status(404).json({ message: `Route ${req.method} ${req.path} not found` });
 });
 
-// error handler — last
+// ===== ERROR HANDLER =====
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
-const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/matrimony';
+app.use('/api/dashboard', dashboardRoutes);
+
+// ===== DATABASE + SERVER START =====
+const PORT = Number(process.env.PORT) || 10000; // Render injects PORT
+const MONGODB_URI = process.env.MONGODB_URI;
 
 mongoose.set('strictQuery', false);
 
 let stopPayoutProcessor = null;
 
 mongoose
-  .connect(MONGODB_URI)
+  .connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 15000, // fail fast if Mongo is unreachable
+  })
   .then(() => {
-    // eslint-disable-next-line no-console
     console.log('MongoDB connected successfully');
 
     stopPayoutProcessor = startPayoutProcessor({ intervalMs: 10 * 60 * 1000 });
 
-    httpServer.listen(PORT, () => {
-      // eslint-disable-next-line no-console
-      console.log(`Server running on port ${PORT}`);
+    // 🔴 '0.0.0.0' required for Render — listens on all interfaces
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
     });
   })
   .catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('MongoDB connection error:', err);
+    console.error('MongoDB connection error:', err.message);
     process.exit(1);
   });
 
+// ===== GRACEFUL SHUTDOWN =====
 const shutdown = async (signal) => {
-  // eslint-disable-next-line no-console
   console.log(`${signal} received. Shutting down gracefully...`);
 
   stopPayoutProcessor?.();
@@ -4931,16 +4946,18 @@ const shutdown = async (signal) => {
   httpServer.close(async () => {
     try {
       await mongoose.connection.close();
-      // eslint-disable-next-line no-console
-      console.log('Server closed.');
+      console.log('Server closed cleanly.');
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('Error closing MongoDB connection:', e.message);
+      console.error('Error closing MongoDB:', e.message);
     }
     process.exit(0);
   });
 
-  setTimeout(() => process.exit(1), 10000);
+  // force kill after 10s
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout.');
+    process.exit(1);
+  }, 10000);
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

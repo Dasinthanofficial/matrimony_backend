@@ -60,6 +60,7 @@ import agencyPublicRoutes from './routes/agencyPublicRoutes.js';
 
 import { startPayoutProcessor } from './jobs/payoutProcessor.js';
 
+import dashboardRoutes from './routes/dashboardRoutes.js';
 // ===== ENV VALIDATION =====
 // 🔴 Fail fast with a clear message if required env vars are missing
 const REQUIRED_ENV = ['MONGODB_URI', 'JWT_SECRET'];
@@ -170,6 +171,8 @@ app.use((req, res) => {
 
 // ===== ERROR HANDLER =====
 app.use(errorHandler);
+
+app.use('/api/dashboard', dashboardRoutes);
 
 // ===== DATABASE + SERVER START =====
 const PORT = Number(process.env.PORT) || 10000; // Render injects PORT
