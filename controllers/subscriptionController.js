@@ -1,5 +1,6 @@
 // server/controllers/subscriptionController.js
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 import Subscription from '../models/Subscription.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.js';
@@ -7,7 +8,7 @@ import Payment from '../models/Payment.js';
 import User from '../models/User.js';
 
 import { handleControllerError, AppError } from '../utils/errors.js';
-import { formatPayHereAmount, buildPayHereHash } from '../utils/payhere.js';
+import { formatPayHereAmount } from '../utils/payhere.js';
 
 const FREE_FEATURES = {
   unlimitedMessages: false,
@@ -20,10 +21,31 @@ const FREE_FEATURES = {
   noAds: false,
 };
 
-const payhereCheckoutUrl = () => {
-  // optional override
-  if (process.env.PAYHERE_CHECKOUT_URL) return process.env.PAYHERE_CHECKOUT_URL;
+const md5 = (s) => crypto.createHash('md5').update(String(s)).digest('hex');
 
+// PayHere Hash Logic: hash = UPPER(MD5(merchant_id + order_id + amount + currency + UPPER(MD5(merchant_secret))))
+function buildPayHereHash({ merchant_id, order_id, amount, currency, merchant_secret }) {
+  // 1. Hash the secret first and make it Uppercase
+  const hashedSecret = crypto
+    .createHash('md5')
+    .update(String(merchant_secret))
+    .digest('hex')
+    .toUpperCase();
+  
+  // 2. Concatenate fields: MerchantID + OrderID + Amount + Currency + hashedSecret
+  const rawString = 
+    String(merchant_id) + 
+    String(order_id) + 
+    String(amount) + 
+    String(currency) + 
+    hashedSecret;
+
+  // 3. Hash the whole string and return Uppercase
+  return crypto.createHash('md5').update(rawString).digest('hex').toUpperCase();
+}
+
+const payhereCheckoutUrl = () => {
+  if (process.env.PAYHERE_CHECKOUT_URL) return process.env.PAYHERE_CHECKOUT_URL;
   return process.env.PAYHERE_SANDBOX === 'true'
     ? 'https://sandbox.payhere.lk/pay/checkout'
     : 'https://www.payhere.lk/pay/checkout';
@@ -60,7 +82,12 @@ const ensurePayHereConfigured = () => {
   return { merchantId, merchantSecret, clientUrl, serverUrl };
 };
 
-// GET /api/subscriptions/plans  (legacy; your frontend uses /api/plans)
+const featuresArrayToFlags = (features = []) => {
+  const flags = {};
+  for (const f of features) flags[String(f)] = true;
+  return flags;
+};
+
 export const getPlans = async (req, res) => {
   try {
     const plans = await SubscriptionPlan.find({ isActive: true })
@@ -75,7 +102,6 @@ export const getPlans = async (req, res) => {
   }
 };
 
-// GET /api/subscriptions/my-subscription
 export const getMySubscription = async (req, res) => {
   try {
     const subscription = await Subscription.findOneAndUpdate(
@@ -112,8 +138,6 @@ export const getMySubscription = async (req, res) => {
   }
 };
 
-// POST /api/subscriptions/create-checkout
-// Body: { planId: "<SubscriptionPlan._id>" } OR { planId: "<SubscriptionPlan.code>" }
 export const createCheckoutSession = async (req, res) => {
   try {
     const { merchantId, merchantSecret, clientUrl, serverUrl } = ensurePayHereConfigured();
@@ -139,8 +163,6 @@ export const createCheckoutSession = async (req, res) => {
     if (!Number.isFinite(amountMajor) || amountMajor < 0) {
       return res.status(400).json({ message: 'Invalid plan price' });
     }
-
-    // ✅ Do not send free plans to PayHere
     if (amountMajor === 0) {
       return res.status(400).json({
         message: 'This plan is free and does not require payment.',
@@ -177,7 +199,7 @@ export const createCheckoutSession = async (req, res) => {
       merchant_id: merchantId,
       return_url: `${clientUrl}/subscription/success?order_id=${encodeURIComponent(orderId)}`,
       cancel_url: `${clientUrl}/pricing?cancelled=true`,
-      notify_url: `${serverUrl}/api/payments/payhere/notify`,
+      notify_url: `${serverUrl}/api/payments/payhere/notify`, // Standardized route
 
       order_id: orderId,
       items: plan.name,
@@ -187,13 +209,13 @@ export const createCheckoutSession = async (req, res) => {
       first_name: (user?.fullName || 'User').split(' ')[0] || 'User',
       last_name: (user?.fullName || '').split(' ').slice(1).join(' ') || '-',
       email: user?.email || 'no-email@matrimony.local',
-      phone: user?.phone ? `${user?.countryCode || '+94'}${user.phone}` : '',
+      phone: user?.phone ? `${user?.countryCode || '+94'}${user.phone}` : '0771234567',
       address: 'N/A',
       city: 'N/A',
       country: 'Sri Lanka',
     };
 
-    // ✅ REQUIRED for many PayHere accounts
+    // Add PayHere hash (Correctly calculated)
     payload.hash = buildPayHereHash({
       merchant_id: merchantId,
       order_id: orderId,
@@ -202,6 +224,7 @@ export const createCheckoutSession = async (req, res) => {
       merchant_secret: merchantSecret,
     });
 
+    // Save PayHere specific details
     payment.payhere = payment.payhere || {};
     payment.payhere.orderId = orderId;
     await payment.save();
@@ -219,12 +242,10 @@ export const createCheckoutSession = async (req, res) => {
   }
 };
 
-// Stripe removed
 export const createPaymentIntent = async (_req, res) => {
   return res.status(410).json({ message: 'Stripe removed. Use PayHere checkout.', code: 'STRIPE_REMOVED' });
 };
 
-// POST /api/subscriptions/verify
 export const verifyPayment = async (req, res) => {
   try {
     const { orderId } = req.body || {};
