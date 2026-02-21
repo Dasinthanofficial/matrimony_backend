@@ -51,22 +51,28 @@ const payhereCheckoutUrl = () => {
     : 'https://www.payhere.lk/pay/checkout';
 };
 
+// Helper to remove accidental quotes from Render env vars
+const cleanEnv = (val) => {
+  if (!val) return '';
+  return String(val).replace(/^['"]|['"]$/g, '').trim();
+};
+
 const resolveServerUrl = () => {
-  const url = process.env.SERVER_URL || process.env.API_URL;
-  return url ? String(url).replace(/\/+$/, '') : null;
+  const url = cleanEnv(process.env.SERVER_URL || process.env.API_URL);
+  return url ? url.replace(/\/+$/, '') : null;
 };
 
 const resolveClientUrl = () => {
-  const url = process.env.CLIENT_URL;
-  return url ? String(url).replace(/\/+$/, '') : null;
+  const url = cleanEnv(process.env.CLIENT_URL);
+  return url ? url.replace(/\/+$/, '') : null;
 };
 
 const ensurePayHereConfigured = () => {
-  const merchantId = process.env.PAYHERE_MERCHANT_ID;
-  const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
+  const merchantId = cleanEnv(process.env.PAYHERE_MERCHANT_ID);
+  const merchantSecret = cleanEnv(process.env.PAYHERE_MERCHANT_SECRET);
 
   if (!merchantId || !merchantSecret) {
-    throw new AppError('PayHere not configured', 503, 'PAYHERE_NOT_CONFIGURED');
+    throw new AppError('PayHere config missing', 503, 'PAYHERE_NOT_CONFIGURED');
   }
 
   const clientUrl = resolveClientUrl();
